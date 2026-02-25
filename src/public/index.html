@@ -1,0 +1,251 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Video Call</title>
+
+    <!-- Socket.io client (use backend version ideally) -->
+    <script src="https://nonethnically-modish-rickie.ngrok-free.dev/socket.io/socket.io.js"></script>
+
+    <style>
+      video {
+        width: 300px;
+        border: 1px solid black;
+        margin: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Video Calling</h2>
+
+    <video id="localVideo" autoplay muted playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+
+    <br />
+
+    <button id="joinBtn" onclick="joinRoom()">Join Room</button>
+    <button id="videoBtn" onclick="startCall('video')">Video Call</button>
+    <button id="audioBtn" onclick="startCall('audio')">Audio Call</button>
+    <button id="acceptBtn" onclick="acceptCall()">Accept</button>
+    <button id="rejectBtn" onclick="rejectCall()">Reject</button>
+    <button id="endBtn" onclick="endCall()">End</button>
+
+    <script>
+      const userId = prompt("Enter your userId");
+      const receiverId = prompt("Enter receiverId");
+
+      const socket = io("https://nonethnically-modish-rickie.ngrok-free.dev", {
+        query: { userId },
+      });
+      const joinBtn = document.getElementById("joinBtn");
+      const videoBtn = document.getElementById("videoBtn");
+      const audioBtn = document.getElementById("audioBtn");
+      const acceptBtn = document.getElementById("acceptBtn");
+      const rejectBtn = document.getElementById("rejectBtn");
+      const endBtn = document.getElementById("endBtn");
+
+      acceptBtn.style.display = "none";
+      rejectBtn.style.display = "none";
+      endBtn.style.display = "none";
+
+      let roomId = null;
+      let callId = null;
+      let pc;
+      let localStream;
+      let isCaller = false;
+      let callType = null;
+
+      // ========================
+      // JOIN ROOM
+      // ========================
+      function joinRoom() {
+        socket.emit("roomJoin", {
+          receiverId,
+          chatType: "personal",
+        });
+        console.log("inside room join");
+      }
+
+      socket.on("roomJoin", (data) => {
+        if (data.success) {
+          roomId = data.roomId;
+          alert(roomId);
+        } else {
+          alert(data.message);
+        }
+      });
+
+      // ========================
+      // INIT WEBRTC
+      // ========================
+      async function initWebRTC(type) {
+        if (pc) return;
+        const constraints =
+          type === "audio"
+            ? { audio: true, video: false }
+            : { audio: true, video: true };
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+        document.getElementById("localVideo").srcObject = localStream;
+
+        pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+
+        localStream.getTracks().forEach((track) => {
+          pc.addTrack(track, localStream);
+        });
+
+        pc.ontrack = (event) => {
+          document.getElementById("remoteVideo").srcObject = event.streams[0];
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.emit("ice-candidate", {
+              roomId,
+              candidate: event.candidate,
+            });
+          }
+        };
+      }
+
+      // ========================
+      // START CALL
+      // ========================
+      async function startCall(type) {
+        if (!roomId) {
+          alert("Join room first");
+          return;
+        }
+        isCaller = true;
+        callType = type;
+        await initWebRTC(type);
+        socket.emit("callUser", {
+          roomId,
+          receiverId,
+          callType,
+        });
+
+        console.log("inside start call");
+      }
+
+      socket.on("callUser", (data) => {
+        callId = data.callId;
+        callType = data.callType;
+        alert("Incoming call from " + data.callerName);
+        acceptBtn.style.display = "inline";
+        rejectBtn.style.display = "inline";
+      });
+
+      // ========================
+      // ACCEPT CALL
+      // ========================
+      async function acceptCall() {
+        isCaller = false;
+        await initWebRTC(callType);
+
+        socket.emit("callAccept", {
+          roomId,
+          callId,
+        });
+        console.log("inside accept");
+      }
+
+      socket.on("callAccept", async (data) => {
+        if (isCaller && userId == data.callerId) {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          socket.emit("offer", {
+            roomId,
+            offer,
+          });
+        }
+        endBtn.style.display = "inline";
+        rejectBtn.style.display = "none";
+        acceptBtn.style.display = "none";
+        console.log("Call accepted");
+      });
+
+      // ========================
+      // REJECT CALL
+      // ========================
+      function rejectCall() {
+        socket.emit("callReject", {
+          roomId,
+          callId,
+        });
+      }
+      cleanupCall();
+      socket.on("callReject", () => {
+        cleanupCall();
+        alert("Call rejected");
+      });
+
+      // ========================
+      // WEBRTC SIGNALING
+      // ========================
+      socket.on("offer", async ({ offer }) => {
+        if (!pc) await initWebRTC(callType);
+
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        socket.emit("answer", {
+          roomId,
+          answer,
+        });
+      });
+
+      socket.on("answer", async ({ answer }) => {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      });
+
+      socket.on("ice-candidate", async ({ candidate }) => {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.error("ICE error:", err);
+        }
+      });
+
+      // ========================
+      // END CALL
+      // ========================
+      function endCall() {
+        socket.emit("callEnded", {
+          roomId,
+          callId,
+        });
+        cleanupCall();
+      }
+
+      socket.on("callEnded", () => {
+        cleanupCall();
+        alert("Call ended");
+      });
+
+      function cleanupCall() {
+        if (pc) {
+          pc.close();
+          pc = null;
+        }
+        // Stop local stream tracks
+        if (localStream) {
+          localStream.getTracks().forEach((track) => track.stop());
+          localStream = null;
+        }
+
+        document.getElementById("localVideo").srcObject = null;
+        document.getElementById("remoteVideo").srcObject = null;
+
+        callId = null;
+        acceptBtn.style.display = "none";
+        rejectBtn.style.display = "none";
+        endBtn.style.display = "none";
+      }
+    </script>
+  </body>
+</html>
