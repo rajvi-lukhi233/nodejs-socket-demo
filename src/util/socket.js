@@ -1,7 +1,12 @@
+import {
+  createCallHistory,
+  findCallHistoryById,
+  updateCallHistory,
+} from "../service/callHistory.service.js";
 import { findOneGroup } from "../service/group.service.js";
 import { createMessage, updateMessage } from "../service/message.service.js";
 import { createRoom, findOneRoom } from "../service/room.service.js";
-import { CHAT_TYPE, MSG_TYPE } from "./constant.js";
+import { CALL_STATUS, CHAT_TYPE, MSG_TYPE } from "./constant.js";
 
 export const initSocket = (io) => {
   // connect socket
@@ -12,6 +17,7 @@ export const initSocket = (io) => {
     if (!userId) {
       console.log("userId not provide");
     }
+    console.log("user join socket:", userId);
     onlineUsers[userId] = socket.id;
     io.emit("onlineUsers", {
       users: Object.keys(onlineUsers),
@@ -22,8 +28,12 @@ export const initSocket = (io) => {
       const { roomId, receiverId, chatType } = data;
       let newRoomId = roomId;
 
-      if (!receiverId) {
-        return errorEmit(socket, "roomJoin", "receiverId is required");
+      if (!receiverId || !chatType) {
+        return errorEmit(
+          socket,
+          "roomJoin",
+          "receiverId or chatType is required",
+        );
       }
       // 1. if group then checking group existing and required roomId
       if (chatType == CHAT_TYPE.GROUP) {
@@ -42,7 +52,11 @@ export const initSocket = (io) => {
           return errorEmit(socket, "roomJoin", "Room is not found");
         }
         if (!room.users.includes(userId)) {
-          return errorEmit(socket, "roomJoin", "You do not has this room");
+          return errorEmit(
+            socket,
+            "roomJoin",
+            "You are not a member of this room",
+          );
         }
       } else {
         newRoomId = await createRoomFn(userId, receiverId);
@@ -142,6 +156,123 @@ export const initSocket = (io) => {
         .emit("readMessage", { success: true, msgReaderId, isRead: true });
     });
 
+    // video calling history
+    socket.on("callUser", async (data) => {
+      const { roomId, receiverId, callType } = data;
+      if (!roomId || !receiverId || !callType) {
+        console.log("callUser required field missing");
+        return;
+      }
+      const call = await createCallHistory({
+        callerId: userId,
+        receiverId,
+        status: CALL_STATUS.RINGING,
+        callType,
+      });
+      const findCall = await findCallHistoryById(call._id, {
+        _id: 1,
+        callerId: 1,
+      });
+      io.to(roomId).emit("callUser", {
+        callerId: userId,
+        roomId,
+        callId: call._id,
+        callerName: findCall.callerId.name,
+        callType,
+      });
+    });
+    // accepte call
+    socket.on("callAccept", async (data) => {
+      const { roomId, callId } = data;
+      if (!roomId || !callId) {
+        console.log("callId or roomId is required at call accept");
+        return;
+      }
+      const call = await updateCallHistory(
+        { _id: callId },
+        {
+          status: CALL_STATUS.ACCEPTED,
+          startedAt: new Date(),
+        },
+      );
+      io.to(roomId).emit("callAccept", {
+        callId,
+        callerId: call.callerId,
+      });
+    });
+    // reject call
+    socket.on("callReject", async (data) => {
+      const { callId, roomId } = data;
+      if (!callId) {
+        console.log("callId or roomId is required at call reject");
+        return;
+      }
+      const call = await updateCallHistory(
+        { _id: callId },
+        {
+          status: CALL_STATUS.REJECTED,
+          endedAt: new Date(),
+        },
+      );
+      io.to(roomId).emit("callReject", { callId, callerId: call.callerId });
+    });
+    //ended call
+    socket.on("callEnded", async (data) => {
+      const { callId, roomId } = data;
+      if (!callId || !roomId) {
+        console.log("callId or roomId is required at call accept");
+        return;
+      }
+      const call = await findCallHistoryById(callId, {
+        _id: 1,
+        callerId: 1,
+        receiverId: 1,
+        startedAt: 1,
+      });
+      const endTime = new Date();
+      const duration = call.startedAt ? (endTime - call.startedAt) / 1000 : 0;
+
+      // update call history
+      await updateCallHistory(
+        { _id: callId },
+        {
+          status: CALL_STATUS.ENDED,
+          endedAt: endTime,
+          duration,
+        },
+      );
+
+      io.to(roomId).emit("callEnded", {
+        callId,
+        callerId: call.callerId,
+        receiverId: call.receiverId,
+      });
+    });
+    // video calling webRTC
+    socket.on("offer", (data) => {
+      const { roomId, offer } = data;
+      if (!roomId || !offer) {
+        return;
+      }
+      socket.to(roomId).emit("offer", { userId, offer });
+    });
+    socket.on("answer", (data) => {
+      const { roomId, answer } = data;
+      if (!roomId || !answer) {
+        return;
+      }
+      socket.to(roomId).emit("answer", { userId, answer });
+    });
+    socket.on("ice-candidate", (data) => {
+      const { roomId, candidate } = data;
+      if (!roomId || !candidate) {
+        return;
+      }
+      socket.to(roomId).emit("ice-candidate", { userId, candidate });
+    });
+    socket.on("screen-share-stopped", ({ roomId }) => {
+      socket.to(roomId).emit("screen-share-stopped");
+    });
     //  disconnect socket
     socket.on("disconnect", () => {
       delete onlineUsers[userId];
@@ -168,17 +299,9 @@ async function createRoomFn(userId, receiverId) {
   }
   return room.roomId;
 }
+
+//error emit function
 function errorEmit(socket, event, message) {
   socket.emit(event, { success: false, message });
   console.log(`${event} Error:`, message);
 }
-//error emit function
-
-//io.emit() : send to all connected client
-//io.to().emit() : send to all client in room
-//socket.emit() : send event to this socket
-//socket.to().emit() : send all room join client except sender (sender not get)
-//socket.broadcast.emit() : send event to all othere except sender
-//socket.join(room) : join room
-//socket.leave(room) : leave room
-//socket.rooms : set of rooms

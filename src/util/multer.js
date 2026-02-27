@@ -2,7 +2,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 
-const uploadFolder = path.resolve("src", "public");
+const uploadFolder = path.resolve("src", "public", "upload");
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (!fs.existsSync(uploadFolder)) {
