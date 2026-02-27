@@ -4,7 +4,8 @@
     <title>Video Call</title>
 
     <!-- Socket.io client (use backend version ideally) -->
-    <script src="https://nonethnically-modish-rickie.ngrok-free.dev/socket.io/socket.io.js"></script>
+    <!-- <script src="https://nonethnically-modish-rickie.ngrok-free.dev/socket.io/socket.io.js"></script> -->
+    <script src="http://localhost:5000/socket.io/socket.io.js"></script>
 
     <style>
       video {
@@ -34,7 +35,7 @@
       const userId = prompt("Enter your userId");
       const receiverId = prompt("Enter receiverId");
 
-      const socket = io("https://nonethnically-modish-rickie.ngrok-free.dev", {
+      const socket = io("http://localhost:5000", {
         query: { userId },
       });
       const joinBtn = document.getElementById("joinBtn");
