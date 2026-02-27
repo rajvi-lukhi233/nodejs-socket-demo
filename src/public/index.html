@@ -28,6 +28,7 @@
     <button id="acceptBtn" onclick="acceptCall()">Accept</button>
     <button id="rejectBtn" onclick="rejectCall()">Reject</button>
     <button id="endBtn" onclick="endCall()">End</button>
+    <button id="screenBtn" onclick="startScreenShare()">Share Screen</button>
 
     <script>
       const userId = prompt("Enter your userId");
@@ -42,10 +43,12 @@
       const acceptBtn = document.getElementById("acceptBtn");
       const rejectBtn = document.getElementById("rejectBtn");
       const endBtn = document.getElementById("endBtn");
+      const screenBtn = document.getElementById("screenBtn");
 
       acceptBtn.style.display = "none";
       rejectBtn.style.display = "none";
       endBtn.style.display = "none";
+      screenBtn.style.display = "none";
 
       let roomId = null;
       let callId = null;
@@ -53,7 +56,8 @@
       let localStream;
       let isCaller = false;
       let callType = null;
-
+      let screenStream;
+      let screenTrack;
       // ========================
       // JOIN ROOM
       // ========================
@@ -109,6 +113,72 @@
         };
       }
 
+      //=========================
+      // START SCREEN SHARING
+      //=========================
+      async function startScreenShare() {
+        try {
+          if (!pc) return;
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false,
+          });
+          screenTrack = screenStream.getVideoTracks()[0];
+          document.getElementById("localVideo").srcObject = screenStream;
+          const sender = pc
+            .getSenders()
+            .find((s) => s.track && s.track.kind === "video");
+
+          if (sender) {
+            await sender.replaceTrack(screenTrack);
+          } else {
+            pc.addTrack(screenTrack, screenStream);
+          }
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          socket.emit("offer", {
+            roomId,
+            offer,
+          });
+
+          screenTrack.onended = async () => {
+            if (!screenTrack) return;
+            const videoTrack = localStream.getVideoTracks()[0];
+
+            const sender = pc
+              .getSenders()
+              .find((s) => s.track && s.track.kind === "video");
+
+            if (callType === "audio") {
+              if (sender) {
+                await sender.replaceTrack(null);
+                document.getElementById("localVideo").srcObject = null;
+              }
+            } else {
+              // Video call → go back to camera
+              const videoTrack = localStream.getVideoTracks()[0];
+              if (sender && videoTrack) {
+                await sender.replaceTrack(videoTrack);
+                document.getElementById("localVideo").srcObject = localStream;
+              }
+            }
+            socket.emit("screen-share-stopped", { roomId });
+            screenTrack.stop();
+            screenTrack = null;
+          };
+        } catch (error) {
+          console.log("Screen share error:", error);
+        }
+      }
+      socket.on("screen-share-stopped", () => {
+        // Clear frozen frame
+        if (callType == "audio") {
+          document.getElementById("remoteVideo").srcObject = null;
+        }
+        document.getElementById("remoteVideo").srcObject = localStream;
+      });
       // ========================
       // START CALL
       // ========================
@@ -128,7 +198,9 @@
 
         console.log("inside start call");
       }
-
+      // socket.on("sendCallId", (data) => {
+      //   callId = data.callId;
+      // });
       socket.on("callUser", (data) => {
         callId = data.callId;
         callType = data.callType;
@@ -148,6 +220,7 @@
           roomId,
           callId,
         });
+        console.log("callId at accept call", callId);
         console.log("inside accept");
       }
 
@@ -162,6 +235,7 @@
           });
         }
         endBtn.style.display = "inline";
+        screenBtn.style.display = "inline";
         rejectBtn.style.display = "none";
         acceptBtn.style.display = "none";
         console.log("Call accepted");
@@ -237,7 +311,11 @@
           localStream.getTracks().forEach((track) => track.stop());
           localStream = null;
         }
-
+        // Stop screen sharing tracks
+        if (screenStream) {
+          screenStream.getTracks().forEach((track) => track.stop());
+          screenStream = null;
+        }
         document.getElementById("localVideo").srcObject = null;
         document.getElementById("remoteVideo").srcObject = null;
 
@@ -245,6 +323,7 @@
         acceptBtn.style.display = "none";
         rejectBtn.style.display = "none";
         endBtn.style.display = "none";
+        screenBtn.style.display = "none";
       }
     </script>
   </body>

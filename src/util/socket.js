@@ -270,7 +270,9 @@ export const initSocket = (io) => {
       }
       socket.to(roomId).emit("ice-candidate", { userId, candidate });
     });
-
+    socket.on("screen-share-stopped", ({ roomId }) => {
+      socket.to(roomId).emit("screen-share-stopped");
+    });
     //  disconnect socket
     socket.on("disconnect", () => {
       delete onlineUsers[userId];
