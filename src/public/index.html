@@ -10,7 +10,6 @@
     <style>
       video {
         width: 300px;
-        border: 1px solid black;
         margin: 10px;
       }
     </style>
@@ -19,8 +18,7 @@
     <h2>Video Calling</h2>
 
     <video id="localVideo" autoplay muted playsinline></video>
-    <video id="remoteVideo" autoplay playsinline></video>
-
+    <div id="remoteVideos"></div>
     <br />
 
     <button id="joinBtn" onclick="joinRoom()">Join Room</button>
@@ -33,7 +31,8 @@
 
     <script>
       const userId = prompt("Enter your userId");
-      const receiverId = prompt("Enter receiverId");
+      const receiverId = prompt("Enter receiverId (receiverId/groupId)");
+      const chatType = prompt("Enter chatType (personal / group)");
 
       const socket = io("http://localhost:5000", {
         query: { userId },
@@ -51,67 +50,93 @@
       endBtn.style.display = "none";
       screenBtn.style.display = "none";
 
-      let roomId = null;
+      let roomId = chatType == "group" ? receiverId : null;
       let callId = null;
-      let pc;
+      let peerConnections = {};
       let localStream;
-      let isCaller = false;
       let callType = null;
       let screenStream;
       let screenTrack;
+      let isJoinRoom = false;
       // ========================
       // JOIN ROOM
       // ========================
       function joinRoom() {
         socket.emit("roomJoin", {
+          roomId,
           receiverId,
-          chatType: "personal",
+          chatType,
         });
         console.log("inside room join");
       }
 
       socket.on("roomJoin", (data) => {
         if (data.success) {
+          isJoinRoom = true;
           roomId = data.roomId;
           alert(roomId);
         } else {
-          alert(data.message);
+          alert("failed to join room");
         }
       });
 
       // ========================
       // INIT WEBRTC
       // ========================
-      async function initWebRTC(type) {
-        if (pc) return;
-        const constraints =
-          type === "audio"
-            ? { audio: true, video: false }
-            : { audio: true, video: true };
-        localStream = await navigator.mediaDevices.getUserMedia(constraints);
-
+      async function initLocalStream() {
+        if (localStream) return;
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: callType == "video",
+          audio: true,
+        });
         document.getElementById("localVideo").srcObject = localStream;
+      }
+      // PEER CONNECTION
 
-        pc = new RTCPeerConnection({
+      async function createPeerConnection(remoteUserId) {
+        if (peerConnections[remoteUserId]) {
+          return peerConnections[remoteUserId];
+        }
+        if (!localStream) await initLocalStream();
+        const pc = new RTCPeerConnection({
           iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
         });
 
-        localStream.getTracks().forEach((track) => {
-          pc.addTrack(track, localStream);
-        });
+        // Add local tracks
+        localStream
+          .getTracks()
+          .forEach((track) => pc.addTrack(track, localStream));
 
+        // On remote track
         pc.ontrack = (event) => {
-          document.getElementById("remoteVideo").srcObject = event.streams[0];
+          let remoteVideo = document.getElementById(
+            "remoteVideo_" + remoteUserId,
+          );
+          if (!remoteVideo) {
+            remoteVideo = document.createElement("video");
+            remoteVideo.id = "remoteVideo_" + remoteUserId;
+            remoteVideo.autoplay = true;
+            remoteVideo.playsInline = true;
+            remoteVideo.style.width = "300px";
+            remoteVideo.style.border = "1px solid black";
+            remoteVideo.style.margin = "10px";
+            document.getElementById("remoteVideos").appendChild(remoteVideo);
+          }
+          remoteVideo.srcObject = event.streams[0];
         };
 
+        // ICE candidate
         pc.onicecandidate = (event) => {
           if (event.candidate) {
             socket.emit("ice-candidate", {
               roomId,
+              targetUserId: remoteUserId,
               candidate: event.candidate,
             });
           }
         };
+        peerConnections[remoteUserId] = pc;
+        return pc;
       }
 
       //=========================
@@ -119,52 +144,54 @@
       //=========================
       async function startScreenShare() {
         try {
-          if (!pc) return;
+          if (!localStream) return;
           screenStream = await navigator.mediaDevices.getDisplayMedia({
             video: true,
             audio: false,
           });
           screenTrack = screenStream.getVideoTracks()[0];
           document.getElementById("localVideo").srcObject = screenStream;
-          const sender = pc
-            .getSenders()
-            .find((s) => s.track && s.track.kind === "video");
-
-          if (sender) {
-            await sender.replaceTrack(screenTrack);
-          } else {
-            pc.addTrack(screenTrack, screenStream);
-          }
-
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-
-          socket.emit("offer", {
-            roomId,
-            offer,
-          });
-
-          screenTrack.onended = async () => {
-            if (!screenTrack) return;
-            const videoTrack = localStream.getVideoTracks()[0];
-
+          Object.values(peerConnections).forEach(async (pc) => {
             const sender = pc
               .getSenders()
               .find((s) => s.track && s.track.kind === "video");
-
-            if (callType === "audio") {
-              if (sender) {
-                await sender.replaceTrack(null);
-                document.getElementById("localVideo").srcObject = null;
-              }
+            if (sender) {
+              await sender.replaceTrack(screenTrack);
             } else {
-              // Video call → go back to camera
-              const videoTrack = localStream.getVideoTracks()[0];
-              if (sender && videoTrack) {
-                await sender.replaceTrack(videoTrack);
-                document.getElementById("localVideo").srcObject = localStream;
-              }
+              pc.addTrack(screenTrack, screenStream);
             }
+          });
+
+          for (const pc of Object.values(peerConnections)) {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            // emit to the corresponding remote user
+            const remoteUserId = Object.keys(peerConnections).find(
+              (id) => peerConnections[id] === pc,
+            );
+            socket.emit("offer", { roomId, offer, targetUserId: remoteUserId });
+          }
+
+          screenTrack.onended = async () => {
+            if (!screenTrack) return;
+
+            // Video call → go back to camera
+            Object.values(peerConnections).forEach(async (pc) => {
+              const sender = pc
+                .getSenders()
+                .find((s) => s.track.kind === "video");
+              const videoTrack = localStream.getVideoTracks()[0];
+              if (sender) {
+                if (callType === "audio") {
+                  await sender.replaceTrack(null);
+                  document.getElementById("localVideo").srcObject = null;
+                } else {
+                  await sender.replaceTrack(videoTrack);
+                  document.getElementById("localVideo").srcObject = localStream;
+                }
+              }
+            });
+
             socket.emit("screen-share-stopped", { roomId });
             screenTrack.stop();
             screenTrack = null;
@@ -174,23 +201,26 @@
         }
       }
       socket.on("screen-share-stopped", () => {
-        // Clear frozen frame
-        if (callType == "audio") {
-          document.getElementById("remoteVideo").srcObject = null;
-        }
-        document.getElementById("remoteVideo").srcObject = localStream;
+        Object.keys(peerConnections).forEach((remoteUserId) => {
+          const remoteVideo = document.getElementById(
+            "remoteVideo_" + remoteUserId,
+          );
+          if (remoteVideo) {
+            remoteVideo.srcObject =
+              peerConnections[remoteUserId].getRemoteStreams()[0] || null;
+          }
+        });
       });
       // ========================
       // START CALL
       // ========================
       async function startCall(type) {
-        if (!roomId) {
+        if (!isJoinRoom) {
           alert("Join room first");
           return;
         }
-        isCaller = true;
         callType = type;
-        await initWebRTC(type);
+        await initLocalStream();
         socket.emit("callUser", {
           roomId,
           receiverId,
@@ -214,19 +244,25 @@
       // ACCEPT CALL
       // ========================
       async function acceptCall() {
-        isCaller = false;
-        await initWebRTC(callType);
+        await initLocalStream();
 
         socket.emit("callAccept", {
           roomId,
           callId,
         });
-        console.log("callId at accept call", callId);
+        acceptBtn.style.display = "none";
+        rejectBtn.style.display = "none";
         console.log("inside accept");
       }
 
       socket.on("callAccept", async (data) => {
-        if (isCaller && userId == data.callerId) {
+        if (userId === data.callerId || userId === data.userId) {
+          endBtn.style.display = "inline";
+          screenBtn.style.display = "inline";
+        }
+        callId = data.callId;
+        if (userId == data.callerId) {
+          const pc = await createPeerConnection(receiverId);
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
 
@@ -235,13 +271,24 @@
             offer,
           });
         }
-        endBtn.style.display = "inline";
-        screenBtn.style.display = "inline";
-        rejectBtn.style.display = "none";
-        acceptBtn.style.display = "none";
-        console.log("Call accepted");
       });
+      socket.on("newParticipant", async (data) => {
+        const { userId: remoteUserId } = data;
+        if (remoteUserId === userId) return;
 
+        if (!peerConnections[remoteUserId]) {
+          const pc = await createPeerConnection(remoteUserId);
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          socket.emit("offer", {
+            roomId,
+            offer,
+            targetUserId: remoteUserId,
+          });
+        }
+      });
       // ========================
       // REJECT CALL
       // ========================
@@ -249,9 +296,10 @@
         socket.emit("callReject", {
           roomId,
           callId,
+          userId,
         });
       }
-      cleanupCall();
+
       socket.on("callReject", () => {
         cleanupCall();
         alert("Call rejected");
@@ -260,31 +308,47 @@
       // ========================
       // WEBRTC SIGNALING
       // ========================
-      socket.on("offer", async ({ offer }) => {
-        if (!pc) await initWebRTC(callType);
+      socket.on("offer", async ({ userId: remoteUserId, offer }) => {
+        await initLocalStream();
+        if (!peerConnections[remoteUserId]) {
+          peerConnections[remoteUserId] =
+            await createPeerConnection(remoteUserId);
+        }
+        const pc = peerConnections[remoteUserId];
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
 
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        socket.emit("answer", {
-          roomId,
-          answer,
-        });
+          socket.emit("answer", {
+            roomId,
+            answer,
+            targetUserId: remoteUserId,
+          });
+        } catch (error) {
+          console.error("Offer handling error:", error);
+        }
       });
 
-      socket.on("answer", async ({ answer }) => {
+      socket.on("answer", async ({ userId: remoteUserId, answer }) => {
+        const pc = peerConnections[remoteUserId];
+        if (!pc) return;
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
       });
 
-      socket.on("ice-candidate", async ({ candidate }) => {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (err) {
-          console.error("ICE error:", err);
-        }
-      });
+      socket.on(
+        "ice-candidate",
+        async ({ userId: remoteUserId, candidate }) => {
+          try {
+            const pc = peerConnections[remoteUserId];
+            if (!pc) return;
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (err) {
+            console.error("ICE error:", err);
+          }
+        },
+      );
 
       // ========================
       // END CALL
@@ -294,19 +358,35 @@
           roomId,
           callId,
         });
+
         cleanupCall();
       }
+      socket.on("participantLeft", ({ userId: remoteUserId }) => {
+        const pc = peerConnections[remoteUserId];
 
-      socket.on("callEnded", () => {
+        if (pc) {
+          pc.close();
+          delete peerConnections[remoteUserId];
+        }
+
+        const remoteVideo = document.getElementById(
+          "remoteVideo_" + remoteUserId,
+        );
+
+        if (remoteVideo) {
+          remoteVideo.remove();
+        }
+      });
+      socket.on("callEnded", (data) => {
         cleanupCall();
-        alert("Call ended");
+        if (userId != data.userId) {
+          alert("Call ended");
+        }
       });
 
       function cleanupCall() {
-        if (pc) {
-          pc.close();
-          pc = null;
-        }
+        Object.values(peerConnections).forEach((pc) => pc.close());
+        peerConnections = {};
         // Stop local stream tracks
         if (localStream) {
           localStream.getTracks().forEach((track) => track.stop());
@@ -318,7 +398,7 @@
           screenStream = null;
         }
         document.getElementById("localVideo").srcObject = null;
-        document.getElementById("remoteVideo").srcObject = null;
+        document.getElementById("remoteVideos").innerHTML = "";
 
         callId = null;
         acceptBtn.style.display = "none";

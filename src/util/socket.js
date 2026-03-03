@@ -11,6 +11,7 @@ import { CALL_STATUS, CHAT_TYPE, MSG_TYPE } from "./constant.js";
 export const initSocket = (io) => {
   // connect socket
   let onlineUsers = {};
+  let activeCalls = {};
   io.on("connection", async (socket) => {
     console.log("socket join:", socket.id);
     const userId = socket.handshake.query.userId;
@@ -169,11 +170,15 @@ export const initSocket = (io) => {
         status: CALL_STATUS.RINGING,
         callType,
       });
+      activeCalls[call._id] = {
+        roomId,
+        participants: [userId],
+      };
       const findCall = await findCallHistoryById(call._id, {
         _id: 1,
         callerId: 1,
       });
-      io.to(roomId).emit("callUser", {
+      socket.to(roomId).emit("callUser", {
         callerId: userId,
         roomId,
         callId: call._id,
@@ -195,86 +200,141 @@ export const initSocket = (io) => {
           startedAt: new Date(),
         },
       );
+      if (!activeCalls[callId]) return;
+      activeCalls[callId].participants.push(userId);
+      const participants = activeCalls[callId].participants;
+
+      participants.forEach((participantId) => {
+        if (participantId !== userId) {
+          io.to(onlineUsers[participantId]).emit("newParticipant", {
+            userId,
+          });
+        }
+      });
       io.to(roomId).emit("callAccept", {
         callId,
         callerId: call.callerId,
+        userId,
       });
     });
     // reject call
     socket.on("callReject", async (data) => {
-      const { callId, roomId } = data;
+      const { callId, roomId, userId } = data;
       if (!callId) {
         console.log("callId or roomId is required at call reject");
         return;
       }
-      const call = await updateCallHistory(
-        { _id: callId },
-        {
-          status: CALL_STATUS.REJECTED,
-          endedAt: new Date(),
-        },
+      const callData = activeCalls[callId];
+      if (!callData) return;
+
+      callData.participants = callData.participants.filter(
+        (id) => id !== userId,
       );
-      io.to(roomId).emit("callReject", { callId, callerId: call.callerId });
+
+      io.to(onlineUsers[userId]).emit("callReject", {
+        callId,
+      });
+      if (callData.participants.length > 1) {
+        const call = await updateCallHistory(
+          { _id: callId },
+          {
+            status: CALL_STATUS.REJECTED,
+            endedAt: new Date(),
+          },
+        );
+        io.to(roomId).emit("callReject", { callId, callerId: call.callerId });
+      }
     });
     //ended call
     socket.on("callEnded", async (data) => {
       const { callId, roomId } = data;
       if (!callId || !roomId) {
-        console.log("callId or roomId is required at call accept");
+        console.log("callId or roomId is required at call ended");
         return;
       }
-      const call = await findCallHistoryById(callId, {
-        _id: 1,
-        callerId: 1,
-        receiverId: 1,
-        startedAt: 1,
-      });
-      const endTime = new Date();
-      const duration = call.startedAt ? (endTime - call.startedAt) / 1000 : 0;
+      const callData = activeCalls[callId];
+      if (!callData) {
+        return;
+      }
 
-      // update call history
-      await updateCallHistory(
-        { _id: callId },
-        {
-          status: CALL_STATUS.ENDED,
-          endedAt: endTime,
-          duration,
-        },
+      callData.participants = callData.participants.filter(
+        (id) => id !== userId,
       );
-
-      io.to(roomId).emit("callEnded", {
-        callId,
-        callerId: call.callerId,
-        receiverId: call.receiverId,
+      const remainingParticipants = callData.participants;
+      remainingParticipants.forEach((participantId) => {
+        io.to(onlineUsers[participantId]).emit("participantLeft", {
+          userId,
+        });
       });
+
+      if (remainingParticipants.length <= 1) {
+        const call = await findCallHistoryById(callId, {
+          _id: 1,
+          callerId: 1,
+          receiverId: 1,
+          startedAt: 1,
+        });
+        const endTime = new Date();
+        const duration = call.startedAt ? (endTime - call.startedAt) / 1000 : 0;
+
+        // update call history
+        await updateCallHistory(
+          { _id: callId },
+          {
+            status: CALL_STATUS.ENDED,
+            endedAt: endTime,
+            duration,
+          },
+        );
+        // if (remainingParticipants.length === 1) {
+        io.to(roomId).emit("callEnded", {
+          callId,
+          callerId: call.callerId,
+          receiverId: call.receiverId,
+          userId,
+        });
+        // }
+        delete activeCalls[callId];
+      }
     });
     // video calling webRTC
     socket.on("offer", (data) => {
-      const { roomId, offer } = data;
+      const { roomId, offer, targetUserId } = data;
       if (!roomId || !offer) {
         return;
       }
-      socket.to(roomId).emit("offer", { userId, offer });
+      socket.to(onlineUsers[targetUserId]).emit("offer", { userId, offer });
     });
     socket.on("answer", (data) => {
-      const { roomId, answer } = data;
+      const { roomId, answer, targetUserId } = data;
       if (!roomId || !answer) {
         return;
       }
-      socket.to(roomId).emit("answer", { userId, answer });
+      socket.to(onlineUsers[targetUserId]).emit("answer", { userId, answer });
     });
     socket.on("ice-candidate", (data) => {
-      const { roomId, candidate } = data;
+      const { roomId, candidate, targetUserId } = data;
       if (!roomId || !candidate) {
         return;
       }
-      socket.to(roomId).emit("ice-candidate", { userId, candidate });
+      socket
+        .to(onlineUsers[targetUserId])
+        .emit("ice-candidate", { userId, candidate });
     });
     socket.on("screen-share-stopped", ({ roomId }) => {
       socket.to(roomId).emit("screen-share-stopped");
     });
+
     //  disconnect socket
     socket.on("disconnect", () => {
+      Object.keys(activeCalls).forEach((callId) => {
+        const callData = activeCalls[callId];
+        if (callData.participants.includes(userId)) {
+          callData.participants = callData.participants.filter(
+            (id) => id !== userId,
+          );
+        }
+      });
       delete onlineUsers[userId];
       io.emit("onlineUsers", {
         users: Object.keys(onlineUsers),
