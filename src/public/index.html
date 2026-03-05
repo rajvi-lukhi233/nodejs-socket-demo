@@ -8,8 +8,9 @@
     <script src="http://localhost:5000/socket.io/socket.io.js"></script>
 
     <style>
-      video {
+      .call-active {
         width: 300px;
+        border: 1px solid black;
         margin: 10px;
       }
     </style>
@@ -89,6 +90,7 @@
           video: callType == "video",
           audio: true,
         });
+        document.getElementById("localVideo").classList.add("call-active");
         document.getElementById("localVideo").srcObject = localStream;
       }
       // PEER CONNECTION
@@ -398,6 +400,7 @@
           screenStream = null;
         }
         document.getElementById("localVideo").srcObject = null;
+        document.getElementById("localVideo").classList.remove("call-active");
         document.getElementById("remoteVideos").innerHTML = "";
 
         callId = null;
